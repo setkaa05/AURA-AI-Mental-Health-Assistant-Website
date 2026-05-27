@@ -59,8 +59,6 @@ def load_and_prepare_data():
     id_to_aura_label = {idx: label for label, idx in aura_label_to_id.items()}
     
     def map_labels(example):
-        # GoEmotions can have multiple labels. We take the first one for simplicity in this pipeline,
-        # or map all and take the most dominant AURA class.
         orig_label_ids = example['labels']
         if not orig_label_ids:
             return {"label": aura_label_to_id["neutral"]} # Default
@@ -99,13 +97,16 @@ class WeightedLossTrainer(Trainer):
         self.class_weights = class_weights
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        labels = inputs.pop("labels")
+        labels = inputs.get("labels")
         outputs = model(**inputs)
         logits = outputs.logits
         
+        # Ensure weights are on the same device as logits
+        weights = self.class_weights.to(logits.device) if self.class_weights is not None else None
+        
         # CrossEntropyLoss with weights to handle class imbalance
-        loss_fct = nn.CrossEntropyLoss(weight=self.class_weights)
-        loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
+        loss_fct = nn.CrossEntropyLoss(weight=weights)
+        loss = loss_fct(logits.view(-1, model.config.num_labels), labels.view(-1))
         
         return (loss, outputs) if return_outputs else loss
 
@@ -192,10 +193,14 @@ def main():
     # Calculate Class Weights to handle imbalance
     print("Calculating class weights...")
     train_labels = tokenized_dataset['train']['label']
-    class_counts = np.bincount(train_labels)
+    # Use minlength to ensure array has 7 elements, even if a class is entirely missing
+    class_counts = np.bincount(train_labels, minlength=len(AURA_EMOTIONS))
     total_samples = len(train_labels)
+    
+    # Avoid division by zero
+    class_counts = np.where(class_counts == 0, 1, class_counts)
     class_weights = total_samples / (len(AURA_EMOTIONS) * class_counts)
-    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float).to(model.device)
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
     print(f"Class Weights: {class_weights}")
 
     # Define Training Arguments

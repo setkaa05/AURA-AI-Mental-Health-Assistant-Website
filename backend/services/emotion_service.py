@@ -9,6 +9,7 @@ Models:
   - sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (embeddings)
 """
 
+import os
 import json
 import time
 import logging
@@ -56,6 +57,9 @@ class EmotionService:
         self._emotion_pipeline = None
         self._sentiment_pipeline = None
         self._embedder = None
+        self._model_path = "models/fine_tuned_emotion"
+        self._fallback_model = "j-hartmann/emotion-english-distilroberta-base"
+        self._current_model_used = None
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"EmotionService initialized — device: {self._device}")
 
@@ -63,16 +67,24 @@ class EmotionService:
 
     def _load_emotion_model(self):
         if self._emotion_pipeline is None:
-            logger.info("Loading DistilRoBERTa emotion model…")
+            # Check if local fine-tuned model exists
+            if os.path.exists(self._model_path):
+                model_to_load = self._model_path
+                logger.info(f"Loading local fine-tuned model from {self._model_path}…")
+            else:
+                model_to_load = self._fallback_model
+                logger.warning(f"Local model not found. Falling back to {self._fallback_model}…")
+
+            self._current_model_used = model_to_load
             self._emotion_pipeline = pipeline(
                 "text-classification",
-                model="j-hartmann/emotion-english-distilroberta-base",
+                model=model_to_load,
                 top_k=None,          # Return all class scores
                 device=0 if self._device == "cuda" else -1,
                 truncation=True,
                 max_length=512,
             )
-            logger.info("✅ Emotion model loaded")
+            logger.info(f"✅ Emotion model loaded: {model_to_load}")
 
     def _load_sentiment_model(self):
         if self._sentiment_pipeline is None:
@@ -144,12 +156,16 @@ class EmotionService:
             4
         )
 
+        # Top K emotions (already sorted by pipeline)
+        top_k = [{"label": k, "score": v} for k, v in sorted(scores.items(), key=lambda item: item[1], reverse=True)[:3]]
+
         inference_time = round((time.time() - start_time) * 1000, 2)  # ms
 
         return {
             "primary_emotion": primary_emotion,
             "confidence": confidence,
             "scores": scores,
+            "top_k_emotions": top_k,
             "sentiment": sentiment_label,
             "sentiment_score": round(sentiment_score, 4),
             "valence": valence,
@@ -157,7 +173,7 @@ class EmotionService:
             "ambient_theme": AMBIENT_THEMES.get(primary_emotion, AMBIENT_THEMES["neutral"]),
             "emotion_meta": EMOTION_META.get(primary_emotion, {}),
             "inference_time_ms": inference_time,
-            "model": "j-hartmann/emotion-english-distilroberta-base",
+            "model": self._current_model_used,
             "device": self._device,
             "timestamp": datetime.utcnow().isoformat(),
         }
